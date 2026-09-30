@@ -3,6 +3,9 @@
 Check a third-party Claude Code skill, plugin or MCP server **before** it goes live. It lists
 the exact lines worth reading, and it never tells you the package is safe.
 
+`report` works on any package. `install` and `undo` handle skills. For plugins and MCP
+servers, read the report, then install them the normal way (`/plugin`, or your MCP config).
+
 ## In plain words
 
 Installing someone else's skill into Claude Code is like letting a stranger's recipe run your
@@ -64,9 +67,12 @@ python inspect-third-party.py list
   *outside* `~/.claude`, so fetching something can never make it live. The clone uses
   `--depth 1 --no-recurse-submodules`, so it can't pull in code you didn't name.
 - **`report`** exits **1** if anything was flagged, **0** if nothing was, and **2** if it
-  couldn't inspect the package. So it can gate a script.
-- **`install`** copies the package into `~/.claude/skills/` or `~/.claude/plugins/` and records
-  a manifest: the exact list of files it placed.
+  couldn't inspect the package. So it can gate a script. "Flagged" includes anything it
+  *couldn't* read: an unreadable file is exactly where a payload would choose to be. It shows
+  25 hits per category, lines from files that will run first; `--all` shows every one.
+- **`install`** copies the package into `~/.claude/skills/` and records a manifest: the exact
+  list of files it placed. (`--kind plugin` copies into `~/.claude/plugins/`, but Claude Code
+  loads plugins through a marketplace, so for plugins prefer `/plugin`.)
 - **`undo`** removes exactly the files on that list and nothing else. Anything that appeared
   in the folder later, whether your own edits or files the skill wrote while running, is kept
   and listed for you to decide about.
@@ -84,11 +90,21 @@ python inspect-third-party.py list
 | `OBFUSCATION` | base64, `atob`, `fromCharCode`, any line over 400 characters |
 | `DESTRUCTIVE` | `rm -rf`, `rmtree`, `git reset --hard`, `Remove-Item` |
 
-It also lists, without judging them:
+Every file is read, whatever its extension. A script called `notes.dat` is still a script.
+UTF-16 files, which Windows tools often use for PowerShell, are decoded rather than skipped.
+
+It also lists:
 - every file that will actually **run**, including extensionless scripts that start with `#!`
-- every **symbolic link**. A link can point anywhere on your disk, so `install` refuses packages
-  that contain one.
-- every file it **couldn't read**
+- every **`` !`command` ``** line in Markdown. Claude Code runs these in command and skill files
+  *before* the model reads the text, so they're scanned everywhere, prose included.
+- every **link** (symbolic links and Windows junctions). A link can point anywhere on your disk,
+  so `fetch` refuses junctions and `install` refuses packages that contain any link.
+- every file it **couldn't read** (binary, or over 5 MB), and every **dependency folder**
+  (`node_modules`, `.venv`, `vendor`). These flag the report. Ordinary media files (images,
+  fonts, PDFs) are named but don't flag it.
+- hits inside **licence files**, in their own section. They're almost always boilerplate URLs,
+  but they still flag the report: during review, a credential-stealing script was hidden in a
+  file called `NOTICE`, with a hook set up to run it.
 
 ## ⚠️ What it cannot do: stated on purpose
 
@@ -97,7 +113,9 @@ are instructions *to the model*. Pattern-matching them only produces noise: the 
 flagged a README for containing the words "CLAUDE.md". So inside Markdown, only the parts that
 become actions are scanned, meaning fenced code blocks and frontmatter.
 
-That leaves the real attack uncovered. A hostile skill doesn't need a script; it can simply
+The one exception is `` !`command` ``, which Claude Code runs, so it's scanned on every line.
+
+That still leaves the real attack uncovered. A hostile skill doesn't need a script; it can simply
 *tell* Claude to go and read your keys. No pattern can judge that. So the tool counts the
 prose and puts it in front of you under `INSTRUCTIONS TO THE MODEL`. It is never silently
 dropped.
@@ -127,8 +145,10 @@ So the trade-off is plain: **you have to remember to run this one.**
 
 The report prints lines copied out of a stranger's files, so it treats them as hostile too:
 
-- **Terminal control codes are neutralised.** Otherwise a line in the package could move the
-  cursor and overwrite the findings printed above it.
+- **Characters that change what the terminal shows are neutralised.** That covers control
+  codes (which could move the cursor and overwrite the findings above), newlines in file names
+  (which could print a fake report line), and the invisible text-direction characters that
+  make a line display in a different order from the order it runs (the "Trojan Source" trick).
 - **Non-ASCII characters degrade to `?` instead of crashing.** One check-mark character in a
   real plugin's shell script once killed the whole report halfway through. That means a
   package could hide its own findings just by containing an unusual byte.
@@ -141,9 +161,15 @@ The report prints lines copied out of a stranger's files, so it treats them as h
 python -m unittest discover tests
 ```
 
-18 tests. The hostile packages are generated in a temporary folder at run time, so this repo
+29 tests. The hostile packages are generated in a temporary folder at run time, so this repo
 never ships anything that looks like a payload, and nothing on your machine is touched. The
-symlink test needs Linux, macOS, or Windows with developer mode, and skips itself otherwise.
+symlink test needs Linux, macOS, or Windows with developer mode; the junction test needs
+Windows. Each skips itself where it can't run.
+
+Twelve of the tests come from a security review of the first version, which found ways to hide
+a payload from it: a script in a `NOTICE` file, a NUL byte that made a script look binary, an
+unlisted extension, UTF-16, `` !`command` `` in prose, a flood of harmless hits pushing the real
+one off-screen, and a Windows junction. Each of those tests fails on the old code.
 
 ## Licence
 
